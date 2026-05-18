@@ -707,47 +707,67 @@ itcl::body AWController::song_at_index {index} {
     log_msg "Fetching $_ftype song at index $index."
 		
     if {$_ftype eq "AW16G"} {
-	    # finding AW16G songs is a little tricky
-	    
+	    # finding AW16G songs is a little tricky.
+	    #
+	    # User songs live in the song-info table starting at the entry
+	    # whose 'offset' field is zero. They are NOT guaranteed to occupy
+	    # consecutive slots after that — factory presets and stale entries
+	    # may be interleaved. We must skip over slots whose computed
+	    # song-block location is past EOF (i.e. the song's data lives on
+	    # a later disk in a multi-disk backup) or whose first track header
+	    # doesn't start with "V_TR" (i.e. the slot is junk).
+
         for {set i 0} {$i < $::awg::songinfo_max_count} {incr i} {
 	        set buffer {}
-			set location [expr ($i * $bufsz) + $start]
-			
-			# This song header exists on another disk???
-			# Current version of software is not capable of handling this.
-			if {[expr $location + $::awg::songblock_size] > [$_current bytes]} {
-			    set err "ERROR: Too many songs in backup file. Sorry"
-                log_msg $err
-				puts $err
-				flush stdout
-    		    return ""
+			set probe_loc [expr ($i * $bufsz) + $start]
+
+			# Reached the end of the song-info table itself?
+			if {[expr $probe_loc + $bufsz] > [$_current bytes]} {
+			    break
 			}
-			
-			# seek to song location, and pull in the info buffer
-			seek $_fh $location start
+
+			# seek to song-info entry, and pull in the info buffer
+			seek $_fh $probe_loc start
 			set buffer [read $_fh $bufsz]
-			
+
 		    # aw16g song offset number is very important in locating song data
 			binary scan [string range $buffer 0x20 [expr 0x20 + 4]] I* offset
-			
+
 			# offset of 0x0000 indicates beginning of the valid song blocks
 			if {$offset == 0} { incr found }
-			
-			if {$found} {
-    			if {$count == $index} {
-					# correct buffer found! update loction and offset values
-        		    set location [expr ($offset * $::aw::block_size) + \
-        		    					$::awg::songblock_location]
-        		    					
-        		    set name [clean_c_string [string range $buffer \
-        		    				$::awg::songinfo_name_offset \
-        							[expr $::awg::songinfo_name_offset + \
-        							$::awg::songinfo_name_size] ]]					
-            	    
-        		    break	
-    			}
-				incr count
-            }
+			if {! $found} { continue }
+
+			# Compute the candidate song-block location and validate it.
+			set candidate_loc [expr ($offset * $::aw::block_size) + \
+									$::awg::songblock_location]
+			if {[expr $candidate_loc + $::awg::songblock_size] > [$_current bytes]} {
+			    log_msg "Song-info entry $i offset 0x[format %x $offset] resolves past EOF; skipping (data is on another disk)."
+			    continue
+			}
+
+			# Verify there's a valid track header at the candidate location.
+			seek $_fh [expr $candidate_loc + $::awg::trackinfo_offset] start
+			set probe [read $_fh 4]
+			if {$probe ne "V_TR"} {
+			    log_msg "Song-info entry $i has no V_TR track header at 0x[format %x $candidate_loc]; skipping."
+			    continue
+			}
+
+			# Valid song-info entry. Is this the one we were asked for?
+			if {$count == $index} {
+        		set location $candidate_loc
+        		set name [clean_c_string [string range $buffer \
+        					$::awg::songinfo_name_offset \
+        					[expr $::awg::songinfo_name_offset + \
+        					$::awg::songinfo_name_size] ]]
+        		break
+			}
+			incr count
+        }
+
+        # End of table without finding the requested index -> no more songs.
+        if {$name eq ""} {
+            return ""
         }
     } else {
         # finding aw4416/2816 song buffers is easy!
