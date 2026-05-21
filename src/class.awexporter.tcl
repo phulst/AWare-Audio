@@ -158,8 +158,15 @@ itcl::body AWExporter::frame_to_file {frame} {
 	}
 	
 	# determine starting location of this frame
+	#
+	# Audio frame numbers index the disk's shared audio area, which starts
+	# at songblock_location (the fixed constant). For song 0 this happens to
+	# equal the song's metadata location and the older form
+	#     [$song location] + frame * block_size
+	# gave correct results; for songs 1+ in a multi-song single-disk backup
+	# it would resolve far past EOF and look like a missing disk.
 	if {[$parent type] == "AW16G" && [[$parent current_file_object] index] == 0} {
-		set frameloc [expr [$song location] + [adjusted_frame_value $frame] * $::aw::block_size]
+		set frameloc [expr $::awg::songblock_location + [adjusted_frame_value $frame] * $::aw::block_size]
 	} else {
  	    set frameloc [expr $audioloc + ([adjusted_frame_value $frame] * $::aw::block_size)]
 	}
